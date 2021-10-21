@@ -5,8 +5,27 @@ let
   lib = libb // {
     isNaersk = platform: platform == "naersk";
     isCrate2Nix = platform: platform == "crate2nix";
+    isBuildRustPackage = platform: platform == "buildRustPackage";
     # equal to `nixpkgs` `supportedSystems` and `limitedSupportSystems` https://github.com/NixOS/nixpkgs/blob/master/pkgs/top-level/release.nix#L14
     defaultSystems = [ "aarch64-linux" "x86_64-darwin" "x86_64-linux" "i686-linux" ];
+    # Tries to convert a cargo license to nixpkgs license.
+    cargoLicenseToNixpkgs = license:
+      let
+        l = libb.toLower license;
+      in
+        {
+          "gplv3" = "gpl3";
+          "gplv2" = "gpl2";
+          "gpl-3.0" = "gpl3";
+          "gpl-2.0" = "gpl2";
+          "mpl-2.0" = "mpl20";
+          "mpl-1.0" = "mpl10";
+        }."${l}" or l;
+    putIfHasAttr = attr: set: libb.optionalAttrs (builtins.hasAttr attr set) { ${attr} = set.${attr}; };
+    dbg = msg: x:
+      if (builtins.getEnv "NCI_DEBUG") == "1"
+      then builtins.trace msg x
+      else x;
   };
 
   # Create an output (packages, apps, etc.) from a common.
@@ -21,20 +40,31 @@ let
       autobins = cargoPkg.autobins or (edition == "2018");
 
       # Find the package source.
-      pkgSrc = if isNull memberName then "${root}/src" else "${root}/${memberName}/src";
+      pkgSrc =
+        let
+          src =
+            if isNull memberName
+            then root + "/src"
+            else root + "/${memberName}" + "/src";
+        in
+        lib.dbg "package source for ${name} at: ${src}" src;
 
       # Emulate autobins behaviour, get all the binaries of this package.
       allBins =
         lib.unique (
-          [ null ]
+          (lib.optional (builtins.pathExists (pkgSrc + "/main.rs")) {
+            inherit name;
+            exeName = cargoPkg.name;
+          })
           ++ bins
           ++ (lib.optionals
-            (autobins && (builtins.pathExists "${pkgSrc}/bin"))
+            (autobins && (builtins.pathExists (pkgSrc + "/bin")))
             (lib.genAttrs
               (builtins.map
                 (lib.removeSuffix ".rs")
-                (builtins.attrNames (builtins.readDir "${pkgSrc}/bin")))
-              (name: { inherit name; })
+                (builtins.attrNames (builtins.readDir (pkgSrc + "/bin")))
+                (name: { inherit name; })
+              )
             )
           )
         );
@@ -51,13 +81,10 @@ let
       # This takes one "binary output" of this Cargo package.
       mkApp = bin: n: v:
         let
-          ex =
-            if isNull bin
-            then { exeName = n; name = n; }
-            else {
-              exeName = bin.name;
-              name = "${bin.name}${if v.config.release then "" else "-debug"}";
-            };
+          ex = {
+            exeName = bin.exeName or bin.name;
+            name = "${bin.name}${if v.config.release then "" else "-debug"}";
+          };
           drv =
             if (builtins.length (bin.required-features or [ ])) < 1
             then v.package
@@ -82,7 +109,9 @@ let
       };
       # Packages set to be put in the outputs.
       packages = {
-        ${system} = builtins.mapAttrs (_: v: v.package) packagesRaw.${system};
+        ${system} = (builtins.mapAttrs (_: v: v.package) packagesRaw.${system}) // {
+          "${name}-derivation" = lib.createNixpkgsDrv common;
+        };
       };
       # Checks to be put in outputs.
       checks = {
@@ -98,7 +127,7 @@ let
             (
               builtins.map
                 (exe: lib.mapAttrs' (mkApp exe) packagesRaw.${system})
-                allBins
+                (lib.dbg "binaries for ${name}: ${lib.concatMapStringsSep ", " (bin: bin.name) allBins}" allBins)
             );
       };
     in
@@ -110,7 +139,14 @@ let
     } // lib.optionalAttrs (packageMetadata.app or false) {
       inherit apps;
       defaultApp = {
-        ${system} = apps.${system}.${name};
+        ${system} =
+          let
+            appName =
+              if (lib.length allBins) > 0
+              then (lib.head allBins).name
+              else name;
+          in
+          apps.${system}.${appName};
       };
     });
 in
@@ -151,13 +187,15 @@ in
     , enablePreCommitHooks ? false
     , renameOutputs ? { }
     , defaultOutputs ? { }
+    , cargoVendorHash ? lib.fakeHash
+    , useCrate2NixFromPkgs ? false
     }:
     let
       # Helper function to import a Cargo.toml from a root.
       importCargoTOML = root: builtins.fromTOML (builtins.readFile (root + "/Cargo.toml"));
 
       # Import the "main" Cargo.toml we will use. This Cargo.toml can either be a workspace manifest, or a package manifest.
-      cargoToml = importCargoTOML root;
+      cargoToml = importCargoTOML (lib.dbg "root at: ${root}" root);
       # Import the Cargo.lock file.
       cargoLockPath = root + "/Cargo.lock";
       cargoLock =
@@ -190,7 +228,10 @@ in
         )
         workspaceMembers);
       # Get and import the members' Cargo.toml files if we are in a workspace.
-      members = lib.genAttrs globbedWorkspaceMembers (name: importCargoTOML (root + "/${name}"));
+      members =
+        lib.genAttrs
+          (lib.dbg "workspace members: ${lib.concatStringsSep ", " globbedWorkspaceMembers}" globbedWorkspaceMembers)
+          (name: importCargoTOML (root + "/${name}"));
 
       # Get the metadata we will use from the root package attributes if it exists.
       packageMetadata = rootPkg.metadata.nix or null;
@@ -204,15 +245,18 @@ in
         (workspaceMetadata.systems or packageMetadata.systems or lib.defaultSystems);
 
       # Helper function to construct a "commons" from a member name, the cargo toml, and the system.
-      mkCommon = memberName: cargoToml: system: import ./common.nix {
-        inherit lib dependencies buildPlatform memberName cargoToml workspaceMetadata system root overrides sources enablePreCommitHooks;
+      mkCommon = memberName: cargoToml: isRootMember: system: import ./common.nix {
+        inherit
+          lib dependencies buildPlatform memberName cargoToml workspaceMetadata
+          system root overrides sources enablePreCommitHooks cargoVendorHash
+          isRootMember useCrate2NixFromPkgs;
       };
 
-      rootMemberName = if (lib.length workspaceMembers) > 0 then rootPkg.name else null;
+      isRootMember = if (lib.length workspaceMembers) > 0 then true else false;
       # Generate "commons" for the "root package".
-      rootCommons = if ! isNull rootPkg then lib.genAttrs systems (mkCommon rootMemberName cargoToml) else null;
+      rootCommons = if ! isNull rootPkg then lib.genAttrs systems (mkCommon null cargoToml isRootMember) else null;
       # Generate "commons" for all members.
-      memberCommons' = lib.mapAttrsToList (name: value: lib.genAttrs systems (mkCommon name value)) members;
+      memberCommons' = lib.mapAttrsToList (name: value: lib.genAttrs systems (mkCommon name value false)) members;
       # Combine the member "commons" and the "root package" "commons".
       allCommons' = memberCommons' ++ (lib.optional (! isNull rootCommons) rootCommons);
 
@@ -260,6 +304,10 @@ in
       } // lib.optionalAttrs (builtins.hasAttr "app" defaultOutputs) {
         defaultApp = lib.mapAttrs (_: system: system.${defaultOutputs.app}) combinedOutputs.apps;
       };
+      checkedOutputs = lib.warnIf
+        (!(builtins.hasAttr "packages" finalOutputs) && !(builtins.hasAttr "apps" finalOutputs))
+        "No packages found. Did you add the `package.metadata.nix` section to a `Cargo.toml` and added `build = true` under it?"
+        finalOutputs;
     in
-    finalOutputs;
+    checkedOutputs;
 }

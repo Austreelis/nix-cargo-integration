@@ -11,7 +11,7 @@ let
   # devshell's modules.
   devshellOptions = lib.filterAttrs
     (_: lib.isType "option")
-    (pkgs.devshell.eval { configuration = {}; }).options.devshell;
+    (pkgs.devshell.eval { configuration = { }; }).options.devshell;
 
   # A helper function moving all options defined in the root of the config
   # (which name matches ones in `devshellOptions`) under a `devshell` attribute
@@ -33,54 +33,56 @@ let
   #   [workspace.metadata.nix.devshell.devshell]
   #   name = "example"
   #   ```
-  pushUpDevshellOptions = config: let
-    movedOpts = lib.flip lib.filterAttrs config (name: _:
-      lib.warnIf
-        (lib.hasAttr name (config.devshell or { }))
-        (lib.concatStrings [
-          "Option '${name}' defined twice, both under 'config' and "
-          "'config.devshell'. This likely happens when defining both in "
-          ''
-            `Cargo.toml`:
-            ```toml
-            [workspace.metadata.nix.devshell]
-            name = "example"
-            [workspace.metadata.nix.devshell.devshell]
-            name = "example"
-            ```
-          ''
-        ])
-        (lib.hasAttr name devshellOptions)
-    );
-  in lib.recursiveUpdate
-    (builtins.removeAttrs config (lib.attrNames movedOpts))
-    { devshell = movedOpts; };
-
-  # Make devshell configs
-  devshellAttr = workspaceMetadata.devshell or packageMetadata.devshell or null;
-  devshellConfig =
-    if pkgs.lib.isAttrs devshellAttr then
-      pushUpDevshellOptions (builtins.removeAttrs devshellAttr [ "imports" ])
-    else { };
-  devshellFilePath = common.prevRoot + "/devshell.toml";
-
-  # Import the devshell specified in devshell.toml if it exists
-  importedDevshell =
-    if (builtins.pathExists devshellFilePath)
-    then (pkgs.devshell.importTOML devshellFilePath { inherit lib; })
-    else null;
+  pushUpDevshellOptions = config:
+    let
+      movedOpts = lib.flip lib.filterAttrs config (name: _:
+        lib.warnIf
+          (lib.hasAttr name (config.devshell or { }))
+          (lib.concatStrings [
+            "Option '${name}' defined twice, both under 'config' and "
+            "'config.devshell'. This likely happens when defining both in "
+            ''
+              `Cargo.toml`:
+              ```toml
+              [workspace.metadata.nix.devshell]
+              name = "example"
+              [workspace.metadata.nix.devshell.devshell]
+              name = "example"
+              ```
+            ''
+          ])
+          (lib.hasAttr name devshellOptions)
+      );
+    in
+    lib.recursiveUpdate
+      (builtins.removeAttrs config (lib.attrNames movedOpts))
+      { devshell = movedOpts; };
 
   # Create a base devshell config
   baseConfig = {
     language = {
       c = {
         compiler = common.cCompiler;
-        libraries = common.buildInputs;
-        includes = common.buildInputs;
+        libraries = common.buildInputs ++ (with pkgs; lib.optionals stdenv.isDarwin [ libiconv ]);
+        includes = common.buildInputs ++ (with pkgs; lib.optionals stdenv.isDarwin [ libiconv ]);
       };
     };
     packages = (with pkgs; [ nciRust.rustc fd ]) ++ common.nativeBuildInputs ++ common.buildInputs;
     commands = with pkgs; [
+      {
+        package = nciRust.rustc;
+        name = "rustc";
+        category = "rust";
+        command = "rustc $@";
+        help = "The Rust compiler";
+      }
+      {
+        package = nciRust.rustc;
+        name = "cargo";
+        category = "rust";
+        command = "cargo $@";
+        help = "Rust's package manager";
+      }
       {
         package = git;
         category = "vcs";
@@ -110,8 +112,14 @@ let
       {
         name = "fmt";
         category = "flake tools";
-        help = "Format all Rust and Nix files.";
+        help = "Format all Rust and Nix files";
         command = "rustfmt --edition 2018 $(fd --glob '*.rs') && nixpkgs-fmt $(fd --glob '*.nix')";
+      }
+      {
+        name = "update-input";
+        category = "flake tools";
+        help = "Alias for `nix flake lock --update-input input`";
+        command = "nix flake lock --update-input $@";
       }
     ] ++ lib.optionals (! isNull cachixName) [
       {
@@ -131,8 +139,8 @@ let
       command = "nix build -L --show-trace --no-link --impure --expr '(builtins.getFlake (toString ./.)).checks.${common.system}.preCommitChecks'";
     };
     env = with lib; [
-      { name = "LD_LIBRARY_PATH"; eval = "$LD_LIBRARY_PATH:${makeLibraryPath common.runtimeLibs}"; }
-      { name = "LIBRARY_PATH"; eval = "$DEVSHELL_DIR/lib"; }
+      { name = "LD_LIBRARY_PATH"; prefix = "$DEVSHELL_DIR/lib:${makeLibraryPath common.runtimeLibs}"; }
+      { name = "LIBRARY_PATH"; prefix = "$DEVSHELL_DIR/lib"; }
     ] ++ (
       optional ((! isNull cachixName) && (! isNull cachixKey))
         (nameValuePair "NIX_CONFIG" ''
@@ -140,19 +148,53 @@ let
           trusted-public-keys = cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY= ${cachixKey}
         '')
     ) ++ (mapAttrsToList (n: v: { name = n; eval = v; }) common.env);
-    devshell.startup.setupPreCommitHooks.text = ''
+    startup.setupPreCommitHooks.text = ''
       echo "pre-commit hooks are disabled."
     '';
   } // lib.optionalAttrs (builtins.hasAttr "preCommitChecks" common) {
-    devshell.startup.setupPreCommitHooks.text = ''
+    startup.setupPreCommitHooks.text = ''
       echo "Setting up pre-commit hooks..."
       ${common.preCommitChecks.shellHook}
       echo "Successfully set up pre-commit-hooks!"
     '';
   };
 
-  # Helper function to combine devshell configs without loss.
-  combineWithBase = config: lib.mkMerge [ config baseConfig ];
+  # Make devshell configs
+  mkDevshellConfig = attrs:
+    if pkgs.lib.isAttrs attrs then
+      pushUpDevshellOptions (builtins.removeAttrs attrs [ "imports" ])
+    else { };
+
+  # Make configs work workspace and package
+  workspaceConfig = mkDevshellConfig (workspaceMetadata.devshell or null);
+  packageConfig = mkDevshellConfig (packageMetadata.devshell or null);
+
+  # Import the devshell specified in devshell.toml if it exists
+  devshellFilePath = common.prevRoot + "/devshell.toml";
+  importedDevshell =
+    if (builtins.pathExists devshellFilePath)
+    then (pkgs.devshell.importTOML devshellFilePath { inherit lib; })
+    else null;
+
+  # Helper functions to combine devshell configs without loss
+  getOptions = attrs: name: def: attrs.${name} or attrs.devshell.${name} or def;
+  removeDevshellOptions = attrs: builtins.removeAttrs attrs [ "startup" ];
+  combineWith = base: config:
+    let
+      getBaseOpts = getOptions base;
+      getConfOpts = getOptions config;
+    in
+    lib.recursiveUpdate (lib.recursiveUpdate (removeDevshellOptions base) (removeDevshellOptions config)) {
+      devshell.startup = lib.recursiveUpdate (getBaseOpts "startup" { }) (getConfOpts "startup" { });
+      language = lib.recursiveUpdate (getBaseOpts "language" { }) (getConfOpts "language" { });
+      packages = (getBaseOpts "packages" [ ]) ++ (getConfOpts "packages" [ ]);
+      commands = (getBaseOpts "commands" [ ]) ++ (getConfOpts "commands" [ ]);
+      env = (getBaseOpts "env" [ ]) ++ (getConfOpts "env" [ ]);
+    };
+  combineWithBase = combineWith baseConfig;
+
+  # Workspace and package combined config
+  devshellConfig = combineWith workspaceConfig packageConfig;
 
   # Collect final config
   resultConfig = {

@@ -21,7 +21,7 @@ in
   inherit ffmpeg-sys-next;
   ffmpeg-sys = ffmpeg-sys-next;
   libudev-sys = with pkgs; mkOv [ libudev ] [ pkg-config ];
-  alsa-sys = with pkgs; mkOv [ alsaLib ] [ pkg-config ];
+  alsa-sys = with pkgs; mkOv [ alsa-lib ] [ pkg-config ];
   xcb = with pkgs; mkOv [ xorg.libxcb ] [ python3 ];
   xkbcommon-sys = with pkgs; mkOv [ libxkbcommon ] [ pkg-config ];
   expat-sys = with pkgs; mkOv [ expat ] [ cmake ];
@@ -63,4 +63,17 @@ in
   shaderc-sys = _:
     let env = { SHADERC_LIB_DIR = "${pkgs.shaderc.lib}/lib"; };
     in { propagatedEnv = env; } // env;
+  prost-build = prev:
+    let
+      env = {
+        PROTOC = "${protobuf}/bin/protoc";
+        PROTOC_INCLUDE = "${protobuf}/include";
+      };
+      inherit (pkgs) protobuf nciRust;
+      inherit (nciRust) rustfmt;
+    in
+    {
+      buildInputs = (prev.buildInputs or [ ]) ++ [ protobuf rustfmt ];
+      propagatedEnv = env;
+    } // env;
 }

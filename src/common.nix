@@ -1,10 +1,13 @@
 { memberName ? null
+, isRootMember ? false
 , buildPlatform ? "naersk"
+, useCrate2NixFromPkgs ? false
 , enablePreCommitHooks ? false
 , cargoToml ? null
 , workspaceMetadata ? null
 , overrides ? { }
 , dependencies ? [ ]
+, cargoVendorHash ? lib.fakeHash
 , lib
 , sources
 , system
@@ -13,7 +16,9 @@
 let
   # Extract the metadata we will need.
   cargoPkg = cargoToml.package or (throw "No package field found in the provided Cargo.toml.");
-  packageMetadata = cargoPkg.metadata.nix or null;
+  _packageMetadata = cargoPkg.metadata.nix or { };
+  packageMetadata = _packageMetadata // ((overrides.packageMetadata or (_: { })) _packageMetadata);
+  desktopFileMetadata = packageMetadata.desktopFile or null;
 
   # This is named "prevRoot" since we will override it later on.
   prevRoot = attrs.root or null;
@@ -27,7 +32,7 @@ let
     , override ? (_: _: { })
     }:
     import ./nixpkgs.nix {
-      inherit system sources lib override toolchainChannel;
+      inherit system sources lib override toolchainChannel useCrate2NixFromPkgs;
       overrideData = overrideData // { inherit toolchainChannel; };
       buildPlatform = platform;
     };
@@ -86,6 +91,14 @@ let
   # Get a field from all overrides in "empty" crate overrides and flatten them. Mainly used to collect (native) build inputs.
   crateOverridesGetFlattenLists = attrName: libb.unique (libb.flatten (builtins.map (v: v.${attrName} or [ ]) crateOverridesEmpty));
 
+  # TODO: try to convert cargo maintainers to nixpkgs maintainers
+  meta = {
+    platforms = [ system ];
+  } // (lib.optionalAttrs (builtins.hasAttr "license" cargoPkg) { license = lib.licenses."${lib.cargoLicenseToNixpkgs cargoPkg.license}"; })
+  // (lib.putIfHasAttr "description" cargoPkg)
+  // (lib.putIfHasAttr "homepage" cargoPkg)
+  // (lib.putIfHasAttr "longDescription" packageMetadata);
+
   # Create the base config that will be overrided.
   # nativeBuildInputs, buildInputs, and env vars are collected here and they will be used in naersk and devshell.
   baseConfig = {
@@ -112,7 +125,41 @@ let
       memberName
       workspaceMetadata
       packageMetadata
-      runtimeLibs;
+      desktopFileMetadata
+      runtimeLibs
+      cargoVendorHash
+      isRootMember
+      meta;
+
+    mkDesktopFile = ! isNull desktopFileMetadata;
+    mkDesktopItemConfig = pkgName: {
+      name = pkgName;
+      exec = packageMetadata.executable or pkgName;
+      comment = desktopFileMetadata.comment or meta.description or "";
+      desktopName = desktopFileMetadata.name or pkgName;
+    } // (
+      if builtins.hasAttr "icon" desktopFileMetadata
+      then
+        let
+          # If icon path starts with relative path prefix, make it absolute using root as base
+          # Otherwise treat it as an absolute path
+          makeIcon = icon:
+            if lib.hasPrefix "./" icon
+            then root + "/${lib.removePrefix "./" icon}"
+            else icon;
+        in
+        { icon = makeIcon desktopFileMetadata.icon; }
+      else { }
+    )
+    // (lib.putIfHasAttr "genericName" desktopFileMetadata)
+    // (lib.putIfHasAttr "categories" desktopFileMetadata);
+
+    mkRuntimeLibsOv = (builtins.length runtimeLibs) > 0;
+    mkRuntimeLibsScript = libs: ''
+      for f in $out/bin/*; do
+        patchelf --set-rpath "${libs}" "$f"
+      done
+    '';
 
     # Collect build inputs.
     buildInputs =

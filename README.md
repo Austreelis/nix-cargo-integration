@@ -1,11 +1,16 @@
 # nix-cargo-integration
 
-Utility to integrate Cargo projects with Nix.
+Library to easily and effortlessly integrate Cargo projects with Nix.
 
-- Uses [naersk] or [crate2nix] to build Cargo packages and [devshell] to provide development shell.
-- Allows configuration from `Cargo.toml` via `package.metadata.nix` and `workspace.metadata.nix` attributes.
-- Has sensible defaults, and tries to be as compatible as with Cargo itself (autobins, etc.).
+- Uses [naersk], [crate2nix] or [buildRustPackage] to build Cargo packages and [devshell] to provide a development shell.
+Allows changing between "build platforms" by just changing one attribute (see `buildPlatform`).
+- Allows configuration from `Cargo.toml` file(s) via `package.metadata.nix` and `workspace.metadata.nix` attributes.
+- Has sensible defaults, and strives to be compatible with Cargo (autobins, etc.).
 - Aims to offload work from the user; comes with useful configuration options (like `renameOutputs`, `defaultOutputs` etc.)
+- Can generate nixpkgs-compatible Nix expressions that captures all your packages dependencies / env vars and so on.
+You don't need to maintain a seperate derivation for nixpkgs! (see `Generating a nixpkgs-compatible package expression` in manual)
+- [naersk] and [crate2nix] `buildPlatform`s allow building packages directly from `Cargo.lock`. [buildRustPackage] uses the `cargoVendorHash` attribute.
+- A CLI tool that let's you compile and run arbitrary Rust repositories directly without messing with any files or setting up overlays (see `Using the nci CLI` in manual)
 
 ## Usage
 
@@ -49,116 +54,17 @@ You can also couple it with [niv](https://github.com/nmattia/niv):
 
 ### Examples
 
-- [Basic flake.nix template with commented fields and overrides](./example_flake.nix)
+- [Basic flake.nix template with commented fields and overrides](./docs/example_flake.nix)
 - [crate2nix build platform crate overrides usage](https://gitlab.com/veloren/veloren/-/blob/master/flake.nix)
 - [Modifying cargo build options to build a specific feature and changing outputs based on the feature used](https://github.com/yusdacra/bernbot/blob/master/flake.nix)
+- [Flake using a bit of everything](https://github.com/harmony-development/Crust/blob/master/flake.nix)
 
-## Library documentation
+## Documentation
 
-### `makeOutputs`
-
-Runs [makeOutput](#makeOutput) for all systems specified in `Cargo.toml` (defaults to `defaultSystems` of `nixpkgs`).
-
-#### Arguments
-
-- `enablePreCommitHooks`: whether to enable pre-commit hooks (type: boolean) (default: `false`)
-- `buildPlatform`: platform to build crates with (type: `"naersk" or "crate2nix"`) (default: `"naersk"`)
-- `root`: directory where `Cargo.toml` is in (type: path)
-- `overrides`: overrides for devshell, build and common (type: attrset) (default: `{ }`)
-    - `overrides.systems`: mutate the list of systems to generate for (type: `def: [ ]`)
-    - `overrides.sources`: override for the sources used by common (type: `common: prev: { }`)
-    - `overrides.pkgs`: override for the configuration while importing nixpkgs in common (type: `common: prev: { }`)
-    - `override.crateOverrides`: override for crate2nix crate overrides (type: `common: prev: { }`)
-    - `overrides.common`: override for common (type: `prev: { }`)
-        - this will override *all* common attribute set(s), refer to [common.nix](./common.nix) for more information
-    - `overrides.shell`: override for devshell (type: `common: prev: { }`)
-        - this will override *all* [devshell] configuration(s), refer to [devshell] for more information
-    - `overrides.build`: override for build (type: `common: prev: { }`)
-        - this will override *all* [naersk]/[crate2nix] build derivation(s), refer to [naersk]/[crate2nix] for more information
-    - `overrides.mainBuild`: override for main crate build derivation (type: `common: prev: { }`)
-        - this will override *all* [naersk]/[crate2nix] main crate build derivation(s), refer to [naersk]/[crate2nix] for more information
-- `renameOutputs`: which crates to rename in package names and output names (type: attrset) (default: `{ }`)
-- `defaultOutputs`: which outputs to set as default (type: attrset) (default: `{ }`)
-    - `defaultOutputs.app`: app output name to set as default app (`defaultApp`) output (type: string)
-    - `defaultOutputs.package`: package output name to set as default package (`defaultPackage`) output (type: string)
-
-### `package.metadata.nix` and `workspace.metadata.nix` common attributes
-
-- `runtimeLibs`: libraries that will be put in `LD_LIBRARY_PRELOAD` for both dev and build env (type: list)
-- `buildInputs`: common build inputs (type: list)
-- `nativeBuildInputs`: common native build inputs (type: list)
-
-#### `env` attributes
-
-Key-value pairings that are put here will be exported into the development and build environment.
-For example:
-```toml
-[package.metadata.nix.env]
-PROTOC = "protoc"
-```
-
-#### `crateOverride` attributes (only used for `crate2nix` build platform)
-
-Key-value pairings that are put here will be used to override crates in build derivation.
-Dependencies put here will also be exported to the development environment.
-For example:
-```toml
-[package.metadata.nix.crateOverride.xcb]
-buildInputs = ["xorg.libxcb"]
-env.TEST_ENV = "test"
-```
-
-### `package.metadata.nix` attributes
-
-- `build`: whether to enable outputs which build the package (type: boolean)
-    - defaults to `false` if not specified
-- `library`: whether to copy built library to package output (type: boolean)
-    - defaults to `false` if not specified
-- `app`: whether to enable the application output (type: boolean)
-    - defaults to `false` if not specified
-- `longDescription`: a longer description (type: string)
-
-#### `desktopFile` attributes
-
-If this is set to a string specifying a path, the path will be treated as a desktop file and will be used.
-The path must start with "./" and specify a path relative ro `root`. 
-
-- `icon`: icon string according to XDG (type: string)
-    - strings starting with "./" will be treated as relative to `root`
-    - everything else will be put into the desktop file as-is
-- `comment`: comment for the desktop file (type: string)
-    - defaults to `package.description` if not specified
-- `name`: desktop name for the desktop file (type: string)
-    - defaults to `package.name` if not specified
-- `genericName`: generic name for the desktop file (type: string)
-- `categories`: categories for the desktop file according to XDG specification (type: string)
-
-### `workspace.metadata.nix` attributes
-
-NOTE: If `root` does not point to a workspace, all of the attributes listed here
-will be available in `package.metadata.nix`.
-
-- `systems`: systems to enable for the flake (type: list)
-    - equal to `nixpkgs` `supportedSystems` and `limitedSupportSystems` https://github.com/NixOS/nixpkgs/blob/master/pkgs/top-level/release.nix#L14
-- `toolchain`: rust toolchain to use (type: one of "stable", "beta" or "nightly")
-    - if `rust-toolchain` file exists, it will be used instead of this attribute
-
-#### `preCommitHooks` attributes
-
-- `enable`: whether to enable pre commit hooks (type: boolean) (default: `false`)
-
-#### `cachix` attributes
-
-- `name`: name of the cachix cache (type: string)
-- `key`: public key of the cachix cache (type: string)
-
-#### `devshell` attributes
-
-Refer to [devshell] documentation.
-
-NOTE: Attributes specified here **will not** be used if a top-level `devshell.toml` file exists.
+You can find library API documentation and others at [the manual](./docs/MANUAL.md).
 
 [devshell]: https://github.com/numtide/devshell "devshell"
 [naersk]: https://github.com/nmattia/naersk "naersk"
 [crate2nix]: https://github.com/kolloch/crate2nix "crate2nix"
 [flake-compat]: https://github.com/edolstra/flake-compat "flake-compat"
+[buildRustPackage]: https://github.com/NixOS/nixpkgs/blob/master/doc/languages-frameworks/rust.section.md#compiling-rust-applications-with-cargo-compiling-rust-applications-with-cargo "buildRustPackage"

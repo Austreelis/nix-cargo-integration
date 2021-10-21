@@ -2,6 +2,7 @@
 , system
 , lib
 , overrideData
+, useCrate2NixFromPkgs ? false
 , toolchainChannel ? "stable"
 , buildPlatform ? "naersk"
 , override ? (_: _: { })
@@ -34,6 +35,7 @@ let
           then null
           else (fromTOML content).toolchain
         else null;
+      # Whether the toolchain is nightly or not.
       isNightly =
         hasInfix "nightly"
           (if hasRustToolchainFile
@@ -60,41 +62,43 @@ let
     overlays = [
       rustOverlay
       rustToolchainOverlay
-      (final: prev: {
-        nciRust = {
-          inherit (prev) rustc rustfmt clippy cargo;
-        };
-      })
-    ] ++ (
+      # Import the toolchain.
+      (_: prev: { nciRust = { inherit (prev) rustc rustfmt clippy cargo; }; })
       # Overlay the build platform itself.
-      if lib.isNaersk buildPlatform
-      then [
-        (final: prev: {
-          naersk = rustPkgs.callPackage sources.naersk { };
-        })
-      ]
+      (if lib.isNaersk buildPlatform
+      then (_: prev: { naersk = prev.callPackage sources.naersk { }; })
       else if lib.isCrate2Nix buildPlatform
-      then [
-        (final: prev: {
-          crate2nixTools = import "${sources.crate2nix}/tools.nix" { pkgs = rustPkgs; };
+      then
+        (_: prev: {
+          # Use crate2nix source from nixpkgs and the original Rust toolchain from nixpkgs if
+          # the user wants to use crate2nix from nixpkgs
+          crate2nixTools = import "${sources.crate2nix}/tools.nix" {
+            inherit useCrate2NixFromPkgs;
+            pkgs = if useCrate2NixFromPkgs then import sources.nixpkgs { inherit system; } else prev;
+          };
         })
-      ]
-      else throw "invalid build platform: ${buildPlatform}"
-    ) ++ [
+      else if lib.isBuildRustPackage buildPlatform
+      then (_: prev: { rustPlatform = prev.makeRustPlatform { inherit (prev) rustc cargo; }; })
+      else throw "invalid build platform: ${buildPlatform}")
       # Import our utilities here so that they can be utilized.
-      (final: prev: {
-        nciUtils = import ./utils.nix prev;
-      })
+      (_: prev: { nciUtils = import ./utils.nix { pkgs = prev; inherit lib; }; })
     ];
   };
 
   # Create the config for the *main* package set we will use.
+  #
+  # This is different from the "Rust package set". Overlaying rust packages
+  # for the main package set can lead to rebuilds that are often not needed (eg. librsvg rebuilds).
+  # If the user wants a specific package to be rebuilt, they can do so by overriding it's
+  # attributes and use the Rust toolchain provided in `nciRust`.
   config = {
     inherit system;
     overlays = [
       rustOverlay
       # Import our Rust toolchain as an `nciRust` attribute to allow users to utilize it.
+      # Also add rustPkgs here, since it can be useful.
       (final: prev: {
+        inherit rustPkgs;
         nciRust = rustToolchainOverlay final prev;
       })
       (import (sources.devshell + "/overlay.nix"))
@@ -119,7 +123,7 @@ let
       # Finally import our utilities. They must use the Rust package set, since they contain
       # build platform utilities.
       (final: prev: {
-        nciUtils = import ./utils.nix rustPkgs;
+        nciUtils = import ./utils.nix { pkgs = rustPkgs; inherit lib; };
       })
     ];
   };
