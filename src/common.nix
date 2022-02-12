@@ -90,12 +90,27 @@ let
   crateOverridesEmpty = libb.mapAttrsToList (_: v: v { }) crateOverrides;
   # Get a field from all overrides in "empty" crate overrides and flatten them. Mainly used to collect (native) build inputs.
   crateOverridesGetFlattenLists = attrName: libb.unique (libb.flatten (builtins.map (v: v.${attrName} or [ ]) crateOverridesEmpty));
+  noPropagatedEnvOverrides = libb.removePropagatedEnv crateOverrides;
+  # Combine all crate overrides into one big override function, except the main crate override
+  crateOverridesCombined =
+    let
+      filteredOverrides = builtins.removeAttrs noPropagatedEnvOverrides [ cargoPkg.name ];
+      func = prev: prev // (libb.pipe prev (
+        builtins.map
+          (ov: (old: old // (ov old)))
+          (libb.attrValues filteredOverrides)
+      ));
+    in
+    func;
+  # The main crate override is taken here
+  mainBuildOverride = prev: prev // ((noPropagatedEnvOverrides.${cargoPkg.name} or (_: { })) prev);
 
   # TODO: try to convert cargo maintainers to nixpkgs maintainers
   meta = {
     platforms = [ system ];
-  } // (lib.optionalAttrs (builtins.hasAttr "license" cargoPkg) { license = lib.licenses."${lib.cargoLicenseToNixpkgs cargoPkg.license}"; })
-  // (lib.putIfHasAttr "description" cargoPkg)
+  } // (lib.optionalAttrs (builtins.hasAttr "license" cargoPkg) {
+    license = lib.licenses."${lib.cargoLicenseToNixpkgs cargoPkg.license}";
+  }) // (lib.putIfHasAttr "description" cargoPkg)
   // (lib.putIfHasAttr "homepage" cargoPkg)
   // (lib.putIfHasAttr "longDescription" packageMetadata);
 
@@ -106,7 +121,6 @@ let
     lib = {
       inherit
         crateOverridesGetFlattenLists
-        crateOverridesEmpty
         makePkgs;
     } // libb;
 
@@ -115,6 +129,9 @@ let
       useCCompilerBintools
       pkgs
       crateOverrides
+      crateOverridesEmpty
+      crateOverridesCombined
+      noPropagatedEnvOverrides
       cargoPkg
       cargoToml
       buildPlatform
@@ -129,9 +146,13 @@ let
       runtimeLibs
       cargoVendorHash
       isRootMember
-      meta;
+      meta
+      mainBuildOverride;
 
+    # Whether a desktop file should be added to the resulting package.
     mkDesktopFile = ! isNull desktopFileMetadata;
+    # Generate a desktop item config using provided package name
+    # and information from the package's `Cargo.toml`.
     mkDesktopItemConfig = pkgName: {
       name = pkgName;
       exec = packageMetadata.executable or pkgName;
@@ -154,7 +175,10 @@ let
     // (lib.putIfHasAttr "genericName" desktopFileMetadata)
     // (lib.putIfHasAttr "categories" desktopFileMetadata);
 
+    # Whether the binaries should be patched with the libraries inside
+    # `runtimeLibs`.
     mkRuntimeLibsOv = (builtins.length runtimeLibs) > 0;
+    # Utility for generating a script to patch binaries with libraries.
     mkRuntimeLibsScript = libs: ''
       for f in $out/bin/*; do
         patchelf --set-rpath "${libs}" "$f"
@@ -190,7 +214,6 @@ let
     overrides = {
       shell = overrides.shell or (_: _: { });
       build = overrides.build or (_: _: { });
-      mainBuild = overrides.mainBuild or (_: _: { });
     };
   } // libb.optionalAttrs
     (

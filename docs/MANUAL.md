@@ -5,6 +5,7 @@
 - [Generating a nixpkgs-compatible package expression](#generating-a-nixpkgs-compatible-package-expression)
 - [Using the `nci` CLI](#using-the-nci-cli)
 - [Enabling trace](#enabling-trace)
+- [Tips and Tricks](#tips-and-tricks)
 
 ## Library documentation
 
@@ -17,6 +18,14 @@ public API, since these directly modify [devshell] / `buildPlatform` configs.
 
 NOTE: `nix-cargo-integration` does not directly use upstream [naersk] / [crate2nix]. It uses
 forks of them which contain additional fixes and features that aren't upstream.
+
+### The `common` attribute set
+
+This attribute set is passed to (almost) all overrides. It contains everything you may
+need for adding stuff, such as the nixpkgs package set (`common.pkgs`), library with
+`nix-cargo-integration` utilities (`common.lib`) and other shared data between build
+and development shell (`common.buildInputs`, `common.env` etc.). For more information
+on what `common` actually exports, please check the bottom of [common.nix](./src/common.nix).
 
 ### `makeOutputs`
 
@@ -34,15 +43,18 @@ Generates outputs for all systems specified in `Cargo.toml` (defaults to `defaul
     - `overrides.systems`: mutate the list of systems to generate for (type: `def: [ ]`)
     - `overrides.sources`: override for the sources used by common (type: `common: prev: { }`)
     - `overrides.pkgs`: override for the configuration while importing nixpkgs in common (type: `common: prev: { }`)
-    - `overrides.crateOverrides`: override for crate2nix crate overrides (type: `common: prev: { }`)
+    - `overrides.crateOverrides`: override for crate overrides (type: `common: prev: { }`)
+        - with [crate2nix], this will allow you to override per-crate
+        - with [naersk], the overrides here will be collected and be used for
+        overriding the dependencies derivation / main derivation.
+        - with [buildRustPackage], the overrides here will be collected and
+        be used for overriding the resulting derivation.
     - `overrides.common`: override for common (type: `prev: { }`)
-        - this will override *all* common attribute set(s), refer to [common.nix](./common.nix) for more information
+        - this will override *all* common attribute set(s), refer to [common.nix](./src/common.nix) for more information
     - `overrides.shell`: override for devshell (type: `common: prev: { }`)
         - this will override *all* [devshell] configuration(s), refer to [devshell] for more information
     - `overrides.build`: override for build config (type: `common: prev: { }`)
         - this will override [naersk]/[crate2nix]/[buildRustPackage] build config, refer to [naersk]/[crate2nix]/[buildRustPackage] for more information
-    - `overrides.mainBuild`: override for main crate build derivation (type: `common: prev: { }`)
-        - this will override *all* [naersk]/[crate2nix]/[buildRustPackage] main crate build derivation(s), refer to [naersk]/[crate2nix]/[buildRustPackage] for more information
 - `renameOutputs`: which crates to rename in package names and output names (type: attrset) (default: `{ }`)
 - `defaultOutputs`: which outputs to set as default (type: attrset) (default: `{ }`)
     - `defaultOutputs.app`: app output name to set as default app (`defaultApp`) output (type: string)
@@ -165,3 +177,24 @@ NCI_DEBUG=1 nix build --impure .
 [crate2nix]: https://github.com/kolloch/crate2nix "crate2nix"
 [flake-compat]: https://github.com/edolstra/flake-compat "flake-compat"
 [buildRustPackage]: https://github.com/NixOS/nixpkgs/blob/master/doc/languages-frameworks/rust.section.md#compiling-rust-applications-with-cargo-compiling-rust-applications-with-cargo "buildRustPackage"
+
+## Tips and tricks
+
+### Ignoring `Cargo.lock` in Rust libraries
+
+The [official recommendation](https://doc.rust-lang.org/cargo/guide/cargo-toml-vs-cargo-lock.html) for Rust libraries is to add `Cargo.lock` to the `.gitignore`.
+This conflicts with the way paths are evaluated when using a `flake.nix`. Only files
+tracked by the version control system (i.e. git) can be accessed during evaluation.
+This will manifest in the following error:
+```console
+$ nix build
+error: A Cargo.lock file must be present, please make sure it's at least staged in git.
+(use '--show-trace' to show detailed location information)
+```
+
+A neat fix for that is to track the path to `Cargo.lock` without staging it
+([thanks to @bew](https://github.com/yusdacra/nix-cargo-integration/issues/46#issuecomment-962589582)).
+```console
+$ git add --intend-to-add Cargo.lock
+```
+Add `--force` if your `Cargo.lock` is listed in `.gitignore`.
