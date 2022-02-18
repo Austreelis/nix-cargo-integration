@@ -43,7 +43,7 @@ let
           else toolchainChannel);
       # Override the base toolchain and add some default components.
       toolchain = baseRustToolchain.override {
-        extensions = unique ((rustToolchainFile.components or [ ]) ++ [ "rust-src" "rustfmt" "clippy" ]);
+        extensions = unique (rustToolchainFile.components or [ "rust-src" "rustfmt" "clippy" ]);
       };
     in
     {
